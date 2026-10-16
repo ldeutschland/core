@@ -13,18 +13,22 @@ from mcstatus.responses import (
 import pytest
 from syrupy.assertion import SnapshotAssertion
 
-from homeassistant.const import STATE_UNAVAILABLE
+from homeassistant.components.minecraft_server.api import MinecraftServerType
+from homeassistant.const import CONF_TYPE, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 
 from .const import (
+    TEST_BEDROCK_DATA,
     TEST_BEDROCK_STATUS_RESPONSE,
     TEST_HOST,
+    TEST_JAVA_DATA,
     TEST_JAVA_STATUS_RESPONSE,
     TEST_LEGACY_JAVA_STATUS_RESPONSE,
     TEST_PORT,
 )
 
-from tests.common import async_fire_time_changed
+from tests.common import MockConfigEntry, async_fire_time_changed
 
 JAVA_SENSOR_ENTITIES: list[str] = [
     "sensor.mc_dummyserver_com_25566_latency",
@@ -57,6 +61,57 @@ BEDROCK_SENSOR_ENTITIES_DISABLED_BY_DEFAULT: list[str] = [
     "sensor.mc_dummyserver_com_25566_protocol_version",
     "sensor.mc_dummyserver_com_25566_edition",
 ]
+
+
+@pytest.mark.parametrize(
+    "server_type",
+    [
+        pytest.param(MinecraftServerType.JAVA_EDITION, id="java"),
+        pytest.param(MinecraftServerType.LEGACY_JAVA_EDITION, id="legacy_java"),
+    ],
+)
+async def test_sensor_edition_change(
+    hass: HomeAssistant,
+    bedrock_mock_config_entry: MockConfigEntry,
+    entity_registry: er.EntityRegistry,
+    server_type: MinecraftServerType,
+) -> None:
+    """Remove Bedrock-only sensors when reloading with a Java edition."""
+    bedrock_mock_config_entry.add_to_hass(hass)
+    bedrock_only_entity_ids = set(BEDROCK_SENSOR_ENTITIES) - set(JAVA_SENSOR_ENTITIES)
+
+    with (
+        patch(
+            "homeassistant.components.minecraft_server.api.MinecraftServer.async_initialize"
+        ),
+        patch(
+            "homeassistant.components.minecraft_server.api.MinecraftServer.async_get_data",
+            return_value=TEST_BEDROCK_DATA,
+        ) as mock_get_data,
+    ):
+        assert await hass.config_entries.async_setup(bedrock_mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        for entity_id in bedrock_only_entity_ids:
+            assert entity_registry.async_get(entity_id) is not None
+
+        mock_get_data.return_value = TEST_JAVA_DATA
+        hass.config_entries.async_update_entry(
+            bedrock_mock_config_entry,
+            data={**bedrock_mock_config_entry.data, CONF_TYPE: server_type},
+        )
+        assert await hass.config_entries.async_reload(
+            bedrock_mock_config_entry.entry_id
+        )
+        await hass.async_block_till_done()
+
+        for entity_id in bedrock_only_entity_ids:
+            assert entity_registry.async_get(entity_id) is None
+            assert hass.states.get(entity_id) is None
+        assert (
+            hass.states.get("sensor.mc_dummyserver_com_25566_latency").state
+            != STATE_UNAVAILABLE
+        )
 
 
 @pytest.mark.usefixtures("entity_registry_enabled_by_default")
